@@ -41,6 +41,7 @@ for mod_name, rel_p in [
 
 from rag_chatbot.backend.decision_rag_synthesizer import (
     DecisionRAGSynthesizer,
+    build_document_search_query,
     decision_rag_synthesizer as isolated_synthesizer,
 )
 from rag_chatbot.backend.knowledge_base_service import (
@@ -95,6 +96,10 @@ class RAGServiceAdapter:
     def search_documents(self, query: str, top_k: int = 5) -> list:
         """Searches indexed documentation."""
         return self.knowledge_base.search(query=query, top_k=top_k)
+
+    def build_document_search_query(self, query: str, query_type: Optional[str] = None, intent: Optional[str] = None) -> str:
+        """Builds an expanded/normalized document search query."""
+        return build_document_search_query(query, query_type=query_type, intent=intent)
 
     @property
     def groq_api_key(self):

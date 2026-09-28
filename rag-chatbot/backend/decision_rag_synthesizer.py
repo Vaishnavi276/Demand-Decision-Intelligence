@@ -90,6 +90,51 @@ CORE PRINCIPLES (STRICT NO-BLUFF RULE):
 """
 
 
+def build_document_search_query(
+    query: str,
+    query_type: str = "DOCS",
+    intent: Optional[str] = None
+) -> str:
+    """
+    Builds a normalized, concept-focused search query for document retrieval. (FIX 2)
+    For HYBRID queries:
+    1. Removes numeric SKU / product IDs so they do not distort document vector retrieval.
+    2. Removes entity-specific tokens (e.g. 'sku', 'product id').
+    3. Adds targeted domain concepts based on intent (reorder, stockout, forecasting).
+    For DOCS queries:
+    Returns the natural language question.
+    """
+    if query_type != "HYBRID":
+        return query.strip()
+
+    q_lower = query.lower()
+
+    # 1 & 2. Remove SKU/product ID prefixes and numeric IDs
+    clean_q = re.sub(r'\b(?:product\s*(?:id)?:?|sku\s*#?)\s*\d+\b', '', query, flags=re.IGNORECASE)
+    clean_q = re.sub(r'\b\d{4,7}\b', '', clean_q)
+    clean_q = re.sub(r'\b(?:sku|product\s*id)\b', '', clean_q, flags=re.IGNORECASE)
+    clean_q = ' '.join(clean_q.split()).strip()
+
+    # 3. Add relevant domain terms based on detected intent
+    domain_terms = []
+    effective_intent = (intent or "").lower()
+
+    if any(k in q_lower or k in effective_intent for k in ["reorder", "rop", "replenish", "replenishment"]):
+        domain_terms.append("inventory reorder policy safety stock lead time reorder point")
+    elif any(k in q_lower or k in effective_intent for k in ["stockout", "stock out", "out of stock", "run out"]):
+        domain_terms.append("stockout inventory safety stock lead time demand")
+    elif any(k in q_lower or k in effective_intent for k in ["forecast", "forecasting", "model", "accuracy", "wape", "prophet"]):
+        domain_terms.append("demand forecasting methodology models forecast accuracy")
+    elif any(k in q_lower or k in effective_intent for k in ["dead stock", "excess", "inactive", "markdown"]):
+        domain_terms.append("dead stock markdown clearance obsolescence holding cost")
+    else:
+        domain_terms.append("inventory policy safety stock lead time")
+
+    terms_str = " ".join(domain_terms)
+    expanded = f"{clean_q} {terms_str}".strip() if clean_q else terms_str
+    return expanded
+
+
 class DecisionRAGSynthesizer:
     def __init__(self):
         self.groq_api_key = os.getenv("GROQ_API_KEY")
@@ -114,17 +159,8 @@ class DecisionRAGSynthesizer:
         - 'DATA': Live PostgreSQL operational / demand / inventory data
         - 'HYBRID': Questions requiring live data combined with methodology / policy explanation
         """
-        q = query.lower()
+        q = query.lower().strip()
         ctx = context or {}
-
-        doc_keywords = [
-            "prd", "architecture", "srs", "methodology", "guide", "documentation",
-            "how is safety stock calculated", "safety stock formula", "wape formula",
-            "what models are used", "how does prophet work", "croston method",
-            "system design", "sla", "data pipeline guide", "conventions", "stack",
-            "what does the prd say", "system architecture", "what algorithms",
-            "forecasting methodology"
-        ]
 
         hybrid_keywords = [
             "why is this recommended", "why should i order", "why are these items below rop",
@@ -132,20 +168,52 @@ class DecisionRAGSynthesizer:
             "why is sku", "why is product", "how much will that cost and why", "and why", "aur kyu"
         ]
 
-        # 1. Explicit hybrid cues
+        # 1. Explicit hybrid cues (checked first so queries like 'explain why this SKU...' route to HYBRID)
         if any(k in q for k in hybrid_keywords):
             return "HYBRID"
 
-        # 2. Pure documentation cues
-        if any(k in q for k in doc_keywords):
-            return "DOCS"
-
-        # 3. Follow-up "Why?" with previous data context -> HYBRID
+        # Follow-up "Why?" with previous data context -> HYBRID
         if ctx.get("is_follow_up") and any(w in q.split() for w in ["why", "why?", "kyu", "kyun"]):
             return "HYBRID"
 
+        # 2. Pattern-based conceptual/documentation recognition (FIX 1)
+        doc_patterns = [
+            r"how\s+(?:is|are)\s+.*?\s+(?:calculated|determined|computed)",
+            r"how\s+does\s+.*?\s+work",
+            r"what\s+(?:is|are)\s+(?:the\s+)?(?:business\s+)?rules(?:\s+for)?",
+            r"what\s+(?:is|are)\s+(?:the\s+)?rules(?:\s+for)?",
+            r"(?:explain|what\s+is|what)\s+(?:the\s+)?formula(?:\s+for|\s+is\s+used)?",
+            r"explain\s+(?:the\s+)?(?:recommendation\s+logic|methodology|architecture|workflow|pipeline|policy|system|design|formula)",
+            r"why\s+does\s+the\s+system\s+use",
+            r"how\s+(?:is|are)\s+.*?\s+determined",
+            r"what\s+models\s+(?:are\s+used|used)",
+        ]
+        if any(re.search(pat, q) for pat in doc_patterns):
+            return "DOCS"
+
+        # Additional keywords for documentation / methodology / architecture
+        doc_keywords = [
+            "prd", "architecture", "srs", "methodology", "guide", "documentation",
+            "safety stock formula", "wape formula", "croston method",
+            "system design", "sla", "data pipeline guide", "conventions", "stack",
+            "what does the prd say", "system architecture", "what algorithms",
+            "forecasting methodology", "recommendation logic", "business rules",
+            "what formula", "specification", "policy", "workflow", "design"
+        ]
+        if any(k in q for k in doc_keywords):
+            return "DOCS"
+
         # Default: Structured live data
         return "DATA"
+
+    def build_document_search_query(
+        self,
+        query: str,
+        query_type: str = "DOCS",
+        intent: Optional[str] = None
+    ) -> str:
+        """Builds a normalized, concept-focused search query for document retrieval. (FIX 2)"""
+        return build_document_search_query(query, query_type=query_type, intent=intent)
 
     # ── 2. Hybrid Synthesis Engine ───────────────────────────────────────────
 
@@ -248,10 +316,11 @@ class DecisionRAGSynthesizer:
 
         # ── Branch B: Documentation Vector Search (DOCS or HYBRID) ──
         if query_type in ("DOCS", "HYBRID"):
-            search_query = query
-            if query_type == "HYBRID" and conv_ctx.get("previous_template"):
-                search_query = f"{query} {conv_ctx['previous_template']} inventory policy reorder safety stock"
-
+            search_query = self.build_document_search_query(
+                query=query,
+                query_type=query_type,
+                intent=conv_ctx.get("previous_template")
+            )
             doc_hits = self.document_retriever.retrieve(search_query, top_k=3)
             for hit in doc_hits:
                 doc_name = hit["document_name"]
@@ -381,21 +450,49 @@ class DecisionRAGSynthesizer:
     ) -> str:
         """Invokes Groq/OpenAI if configured, else uses deterministic 6-part synthesis."""
 
-        # If data_result signaled insufficient data for cost calculation, return immediate rejection prose
+        # If data_result signaled insufficient data for cost calculation, return rejection prose (FIX 3)
         if data_result and data_result.get("template_name") == "insufficient_data_rejection":
-            missing_items = ", ".join(data_result.get("missing_fields", []))
+            pid = conv_ctx.get("product_id")
+            if conv_ctx.get("product_name"):
+                pname = conv_ctx["product_name"]
+            elif pid:
+                pname = f"SKU {pid}"
+            else:
+                pname = "Not provided"
+
+            qty = conv_ctx.get("quantity")
+            if qty is not None:
+                qty_str = f"{int(qty):,d} units" if float(qty).is_integer() else f"{qty:,.2f} units"
+                unit_cost_str = "Not available in verified database"
+            else:
+                qty_str = "Not provided"
+                unit_cost_str = "Not available"
+
+            unit_cost = conv_ctx.get("unit_cost")
+            if unit_cost is not None:
+                unit_cost_str = f"₹{unit_cost:.2f}"
+
             return (
                 "### Answer\n"
                 "I don't have enough verified data to calculate the procurement cost.\n\n"
+                "### Verified Data\n"
+                f"- Product: {pname}\n"
+                f"- Quantity: {qty_str}\n"
+                f"- Unit Cost: {unit_cost_str}\n\n"
+                "### Result\n"
+                "I don't have enough verified data to calculate the procurement cost.\n\n"
                 "### What this means\n"
-                f"The system cannot verify {missing_items} from the conversation context or catalog database.\n\n"
+                "To calculate procurement cost, the system requires verified product details, order quantity, and unit cost from the catalog or active supplier contracts.\n\n"
                 "### Key numbers\n"
-                "- **Verified Quantity**: Unknown\n"
-                "- **Verified Unit Cost**: Unknown\n\n"
+                f"- **Product**: {pname}\n"
+                f"- **Quantity**: {qty_str}\n"
+                f"- **Unit Cost**: {unit_cost_str}\n\n"
                 "### Recommended action\n"
-                "Please specify the product and quantity (e.g., 'What would it cost to procure 500 units of SKU 19512?').\n\n"
+                "Please ensure the unit cost is configured in the supplier catalog, or provide complete item and quantity details.\n\n"
                 "### Evidence\n"
-                "- **Status**: Missing required entity fields for procurement calculation\n\n"
+                f"- **Product**: {pname}\n"
+                f"- **Quantity**: {qty_str}\n"
+                f"- **Unit Cost**: {unit_cost_str}\n\n"
                 "### Source\n"
                 "Source:\n"
                 "- Demand Decision Intelligence System"
