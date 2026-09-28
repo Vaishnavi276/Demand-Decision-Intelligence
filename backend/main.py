@@ -72,16 +72,6 @@ def startup_checks():
         db.close()
 
 
-# Hardened CORS configuration (No wildcard with credentials enabled)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 # Request tracing & metrics middleware
 @app.middleware("http")
 async def request_tracing_and_metrics_middleware(request: Request, call_next):
@@ -112,17 +102,35 @@ async def request_tracing_and_metrics_middleware(request: Request, call_next):
     except Exception as exc:
         duration = time.time() - start_time
         logger.exception("unhandled_request_exception", error=str(exc), request_id=req_id)
+        origin = request.headers.get("origin")
+        error_headers = {"X-Request-ID": req_id}
+        if origin:
+            error_headers["Access-Control-Allow-Origin"] = origin
+            error_headers["Access-Control-Allow-Credentials"] = "true"
+            error_headers["Access-Control-Allow-Methods"] = "*"
+            error_headers["Access-Control-Allow-Headers"] = "*"
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "error_id": req_id,
                 "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "Internal error",
+                "message": f"Internal error: {exc}",
             },
-            headers={"X-Request-ID": req_id},
+            headers=error_headers,
         )
     finally:
         request_id_ctx.reset(token)
+
+
+# Hardened CORS configuration (Outer layer to always apply CORS headers even on errors)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Register API Routers
