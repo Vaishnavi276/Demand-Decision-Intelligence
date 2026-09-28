@@ -55,7 +55,29 @@ class ContextManager:
         if any(ck in q_lower for ck in cost_keywords):
             entities["is_cost_query"] = True
 
-        # 2. Follow-up intent detection
+        # 2. Pronoun & Broad Query Analysis
+        has_pronoun_ref = bool(re.search(
+            r'\b(?:its|it|this\s+(?:product|sku|item)|the\s+(?:product|sku|item)|that\s+(?:product|sku|item)|is\s+it|does\s+it|for\s+this|for\s+it|about\s+it|of\s+it)\b',
+            q_lower
+        ))
+
+        is_broad_catalog = bool(re.search(
+            r'\b(?:which\s+(?:items|products|skus)|all\s+(?:items|products|skus)|items\s+below|products\s+below|below\s+rop|top\s+\d+|top\s+(?:products|skus)|highest\s+(?:demand|sales|selling)|purchase\s+orders|recent\s+po|supplier\s+po)\b',
+            q_lower
+        ))
+        is_conceptual_query = bool(re.search(
+            r'\b(?:what\s+are\s+the\s+rules|rules\s+for|how\s+(?:is|are)\s+.*?\s+(?:calculated|generated|determined|computed)|methodology|architecture|what\s+models|explain\s+(?:the\s+)?(?:recommendation|forecasting|pipeline))\b',
+            q_lower
+        ))
+        is_broad_or_conceptual = is_broad_catalog or is_conceptual_query
+
+        # Check for elliptical attribute questions:
+        is_elliptical_attr = any(k in q_lower for k in [
+            "reorder point", "current stock", "safety stock", "order quantity", "recommended order",
+            "why recommended", "why is it", "why reorder", "how much will that cost", "what will that cost",
+            "kitna kharcha", "kitne paise"
+        ])
+
         follow_up_cues = [
             "how much", "what will that cost", "cost kya", "kitna kharcha", "kitne paise",
             "why", "why?", "kyu", "kyun", "explain why", "why should i",
@@ -64,8 +86,17 @@ class ContextManager:
             "same for", "for that", "is it expensive", "can we save money", "procure",
             "what would it cost", "procure 500", "order 500"
         ]
-        if any(cue in q_lower for cue in follow_up_cues) or len(q_lower.split()) <= 4:
-            entities["is_follow_up"] = True
+        entities["is_follow_up"] = (any(cue in q_lower for cue in follow_up_cues) or len(q_lower.split()) <= 4) and not is_broad_or_conceptual
+
+        # Genuine follow-up specifically for inheriting previous SKU entity
+        if has_pronoun_ref and not is_broad_or_conceptual:
+            entities["is_genuine_follow_up"] = True
+        elif is_elliptical_attr and not is_broad_or_conceptual:
+            entities["is_genuine_follow_up"] = True
+        elif entities["is_cost_query"] and not is_broad_or_conceptual:
+            entities["is_genuine_follow_up"] = True
+        else:
+            entities["is_genuine_follow_up"] = False
 
         # 3. Explicit quantity in current query: e.g. "procure 500 units", "500 units", "order 100"
         qty_patterns = [
@@ -127,6 +158,7 @@ class ContextManager:
             "previous_query_type": None,
             "previous_table_sample": [],
             "is_follow_up": curr["is_follow_up"],
+            "is_genuine_follow_up": curr.get("is_genuine_follow_up", False),
             "is_cost_query": curr["is_cost_query"],
             "has_verified_cost_inputs": False,
             "missing_cost_fields": [],
@@ -153,8 +185,8 @@ class ContextManager:
                         except Exception:
                             pass
 
-                    # 1. Product carryover if missing
-                    if ctx["product_id"] is None:
+                    # 1. Product carryover ONLY if missing in current query AND query is genuinely a follow-up
+                    if ctx["product_id"] is None and curr.get("is_genuine_follow_up"):
                         if rc_data.get("product_id"):
                             try:
                                 ctx["product_id"] = int(rc_data["product_id"])

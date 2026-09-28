@@ -120,21 +120,32 @@ class SQLRetriever:
         ctx = context or {}
 
         # 1. Determine if this is a SKU-specific inventory query
-        pid = ctx.get("product_id")
-        if not pid:
-            m_sku = re.search(r'\b(?:sku\s*#?|product\s*(?:id)?:?)\s*(\d{1,7})\b', query, re.IGNORECASE)
-            if m_sku:
+        has_current_sku = False
+        pid = None
+        m_sku = re.search(r'\b(?:sku\s*#?|product\s*(?:id)?:?)\s*(\d{1,7})\b', query, re.IGNORECASE)
+        if m_sku:
+            try:
+                pid = int(m_sku.group(1))
+                has_current_sku = True
+            except ValueError:
+                pass
+        else:
+            standalones = re.findall(r'\b(\d{4,6})\b', query)
+            if standalones:
                 try:
-                    pid = int(m_sku.group(1))
+                    pid = int(standalones[0])
+                    has_current_sku = True
                 except ValueError:
                     pass
-            else:
-                standalones = re.findall(r'\b(\d{4,6})\b', query)
-                if standalones:
-                    try:
-                        pid = int(standalones[0])
-                    except ValueError:
-                        pass
+
+        # Inherit from context ONLY if this is a genuine follow-up and not an explicit broad/catalog query
+        if not has_current_sku and ctx.get("is_genuine_follow_up"):
+            pid = ctx.get("product_id")
+
+        is_broad_catalog = bool(re.search(
+            r'\b(?:which\s+(?:items|products|skus)|all\s+(?:items|products|skus)|items\s+below|products\s+below|below\s+rop|top\s+\d+|purchase\s+orders)\b',
+            q_lower
+        ))
 
         inventory_keywords = [
             "reorder", "rop", "reorder point", "stock", "recommend", "recommendation",
@@ -142,10 +153,10 @@ class SQLRetriever:
         ]
         is_inventory_question = any(k in q_lower for k in inventory_keywords) and not (
             "demand for" in q_lower or "sales volume" in q_lower or "forecast accuracy" in q_lower or
-            bool(re.search(r'\btop\s+\d+', q_lower))
+            bool(re.search(r'\btop\s+\d+', q_lower)) or is_broad_catalog
         )
 
-        if pid is not None and is_inventory_question:
+        if pid is not None and is_inventory_question and not is_broad_catalog:
             rec_data = self.get_sku_inventory_recommendation(db, pid, dataset_id=dataset_id)
             pname = rec_data.get("product_name") or f"SKU {pid}"
 
@@ -204,21 +215,60 @@ class SQLRetriever:
                     "is_missing_record": True,
                 }
 
+        # 2. Check if query is a natural-language demand or sales ranking query without a specific numeric SKU
+        is_demand_ranking = (
+            any(phrase in q_lower for phrase in [
+                "highest demand", "highest sales", "highest selling",
+                "top demand", "top sales", "top selling",
+                "most demanded", "most sold", "highest-demand", "highest-sales"
+            ]) or (
+                any(k in q_lower for k in ["highest", "most", "top"]) and
+                any(k in q_lower for k in ["demand", "sales", "selling", "volume", "sold"]) and
+                any(k in q_lower for k in ["product", "products", "sku", "skus", "item", "items"])
+            )
+        ) and not pid
+
+        query_to_execute = query
+        if is_demand_ranking:
+            m_n = re.search(r'\b(?:top|limit)\s*(\d+)\b', q_lower)
+            n = int(m_n.group(1)) if m_n else 10
+            metric = "revenue" if any(k in q_lower for k in ["revenue", "kamai"]) else "demand"
+            query_to_execute = f"Show me the top {n} products by {metric}"
+
         # Broad catalog query or other intent -> Delegate to existing engine
         res = handle_user_natural_language_query(
             db=db,
-            query_text=query,
+            query_text=query_to_execute,
             dataset_id=dataset_id,
             user_id=user_id,
             session_id=session_id,
         )
-        if res and res.get("template_name") == "items_below_rop":
-            rows = res.get("table", {}).get("rows", [])
-            loc = ctx.get("city") or "this dataset"
-            if len(rows) == 0:
-                res["prose"] = f"0 SKUs are currently below ROP in {loc}. No immediate ROP-based procurement action is identified from this query."
-            else:
-                res["prose"] = f"Found {len(rows)} SKUs currently operating below their Reorder Point (ROP) in {loc}. Immediate replenishment review is recommended for these items."
+
+        if res:
+            tpl = res.get("template_name")
+            tbl = res.get("table", {})
+            rows = tbl.get("rows", [])
+            row_count = len(rows)
+
+            if tpl == "items_below_rop":
+                loc = ctx.get("city") or "this dataset"
+                if row_count == 0:
+                    res["prose"] = f"0 SKUs are currently below ROP in {loc}. No immediate ROP-based procurement action is identified from this query."
+                else:
+                    res["prose"] = f"Found {row_count} SKUs currently operating below their Reorder Point (ROP) in {loc}. Immediate replenishment review is recommended for these items."
+
+            elif tpl == "top_n_by":
+                res["prose"] = (
+                    f"These are the top {row_count} products by recorded sales/demand volume. "
+                    f"Review their current stock, ROP, and inventory recommendations before making procurement decisions."
+                )
+
+            elif tpl == "supplier_po_summary":
+                if row_count == 0:
+                    res["prose"] = "No recent purchase orders were found in the database."
+                else:
+                    res["prose"] = f"Found {row_count} recent purchase orders in the database."
+
         return res
 
     def get_verified_product(self, db: Session, product_id: Any) -> Optional[Dict[str, Any]]:

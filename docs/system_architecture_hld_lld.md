@@ -222,6 +222,24 @@ Optimal forward-buy duration under anticipated price hike $\Delta P / P$ with ho
 $$D^* = \frac{\Delta P}{P} \times \frac{365}{h}, \quad Q^* = \bar{d} \times D^*$$
 Constrained by physical warehouse volume ($Q_{\text{storage}}$), working capital ($Q_{\text{capital}}$), and shelf life ($Q_{\text{shelf}} = 0.8 \times \text{shelf\_days} \times \bar{d}$).
 
+#### H. Dead Stock Detection, Financial Exposure & Downward Clearance Optimizer (Prompt 4.8)
+* **Inactivity & Excess Stock Detection Rules:**
+  * **Inactive Inventory:** Zero demand recorded for $N \ge 90$ consecutive days while on-hand stock $\text{Stock}_{\text{on\_hand}} > 0$.
+  * **Excess Cover:** On-hand inventory exceeds 180 days of forward demand ($\text{Days of Cover} = \text{Stock}_{\text{on\_hand}} / \bar{d} > 180$).
+* **Financial Exposure & Liabilities:**
+  * **Capital Tied Up:** $\text{Capital Locked} = \text{Stock}_{\text{on\_hand}} \times C_{\text{unit}}$.
+  * **Monthly Storage Holding Cost:** $\text{Monthly Holding Drag} = \text{Stock}_{\text{on\_hand}} \times \text{Storage Footprint} \times \text{Monthly Rate}$.
+  * **Projected Obsolescence:** Tracked against expiration shelf-life date.
+* **Downward Action Recommendation Engine:**
+  * **TRANSFER:** If $\text{Days of Cover} > 300$, transfer excess inventory to a high-velocity regional distribution hub with demand deficit.
+  * **MARKDOWN:** Solve optimal clearance discount $\delta \in [0.10, 0.60]$ via Price Elasticity of Demand (PED):
+    $$\delta = \frac{1}{|\varepsilon|} \left(\frac{\text{Stock}_{\text{on\_hand}}}{T \cdot \bar{d}} - 1\right)$$
+    targeting inventory liquidation within $T = 45$ days.
+  * **BUNDLE:** Bundle slow-moving item with high-velocity category anchor SKU.
+  * **RETURN_TO_SUPPLIER:** Trigger return if contractual supplier return agreement permits.
+  * **WRITE_OFF:** If inactive for $\ge 270$ consecutive days or past shelf-life obsolescence date.
+  * **DELIST:** If product is categorized in ABC-XYZ cell CZ with negligible daily demand ($\bar{d} < 0.1$).
+
 ---
 
 ### 3.3 Security, Multi-Tenancy & Hardening

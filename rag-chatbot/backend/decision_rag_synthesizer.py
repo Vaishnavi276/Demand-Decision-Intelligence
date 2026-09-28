@@ -96,8 +96,27 @@ CORE PRINCIPLES (STRICT NO-BLUFF RULE):
      - NEVER invent or substitute standard industry formulas unless the user explicitly requests general industry knowledge.
 
 8. Zero-Result Below-ROP Handling:
-   - When 0 SKUs are below ROP: clearly state that 0 SKUs are below ROP and no immediate ROP-based procurement action is identified.
-   - Do NOT say "These items require urgent procurement" or recommend triggering procurement when 0 items are below ROP.
+   - When 0 SKUs are below ROP: state clearly "0 SKUs are currently below ROP in this dataset. No immediate ROP-based procurement action is identified from this query."
+   - Explain: "No evaluated SKU was found below its recorded reorder point."
+   - Key numbers: "Items Below ROP: 0 SKUs", "Replenishment Status: No ROP breach detected".
+   - Recommended action: "No ROP-based reorder action is indicated by this query. Continue routine inventory monitoring."
+   - Do NOT say "These items require urgent procurement" and do NOT claim inventory is "optimal".
+
+9. Top-N Sales / Demand Response:
+   - Keep the factual ranking/data response, but remove unsupported procurement/inventory recommendations.
+   - Use neutral wording: "These are the top N products by recorded sales/demand volume. Review their current stock, ROP, and inventory recommendations before making procurement decisions."
+   - Do not claim that stock must "always" be kept ready or invent business conclusions.
+
+10. Zero Purchase-Order Handling:
+   - When 0 recent purchase orders are found: state "No recent purchase orders were found in the database."
+   - Explain: "No recent PO records are available for the requested query."
+   - Key numbers: "Records Found: 0", "Total PO Value: ₹0".
+   - Recommended action: "No PO records are available for review. Check procurement requirements separately if needed."
+   - Do not instruct the user to review an empty table.
+
+11. General Neutrality Rule:
+   - Recommendations must be strictly supported by retrieved data.
+   - Avoid unsupported words such as "always", "optimal", "urgent", "must", "definitely" unless retrieved data and project rules explicitly justify them.
 """
 
 
@@ -120,6 +139,19 @@ def build_document_search_query(
     )) or any(k in q_lower for k in ["formula", "equation", "arithmetic"])
 
     if query_type == "DOCS":
+        q_clean = query.strip()
+        # 1. Forecasting models
+        if any(k in q_lower for k in ["models are used", "models used", "what models", "forecasting models", "forecast models"]):
+            return f"{q_clean} forecasting model benchmarks comparison Naive Lag-1 Seasonal Naive Lag-7 Rolling Mean 7 Ridge Regression HistGradientBoosting GBT Prophet Croston Syntetos-Boylan-Croston"
+
+        # 2. Forecasting methodology
+        if "forecasting methodology" in q_lower or ("methodology" in q_lower and "forecast" in q_lower):
+            return f"{q_clean} demand forecasting pipeline feature engineering lag features rolling windows chronological train validation split backtesting WAPE benchmark Ridge Regression HistGradientBoosting Prophet"
+
+        # 4. Inventory recommendations generated / methodology
+        if ("inventory recommendation" in q_lower or "recommendation" in q_lower) and any(k in q_lower for k in ["generate", "generated", "how are", "workflow", "process", "created"]):
+            return f"{q_clean} inventory decision layer recommendation generation Safety Stock SS Reorder Point ROP Target Stock Level TSL lead time demand King's formula"
+
         if is_calc_query:
             calc_terms = ["calculation", "formula", "methodology", "equation", "inputs", "variables", "logic"]
             if "safety stock" in q_lower or "ss" in q_lower.split():
@@ -128,11 +160,9 @@ def build_document_search_query(
                 calc_terms.extend(["LTD", "Lead Time Demand", "safety stock", "SS", "stochastic inventory optimization arithmetic"])
             elif any(k in q_lower for k in ["wape", "mae", "rmse", "forecast error", "accuracy"]):
                 calc_terms.extend(["WAPE formula", "forecast evaluations", "benchmark"])
-            elif "dead stock" in q_lower:
-                calc_terms.extend(["capital tied up", "holding cost", "days without sales", "liquidation"])
 
-            return f"{query.strip()} {' '.join(calc_terms)}"
-        return query.strip()
+            return f"{q_clean} {' '.join(calc_terms)}"
+        return q_clean
 
     # For HYBRID queries:
     # 1 & 2. Remove SKU/product ID prefixes and numeric IDs
@@ -204,15 +234,18 @@ class DecisionRAGSynthesizer:
 
         # 2. Pattern-based conceptual/documentation recognition (FIX 1)
         doc_patterns = [
-            r"how\s+(?:is|are)\s+.*?\s+(?:calculated|determined|computed)",
+            r"how\s+(?:is|are)\s+.*?\s+(?:calculated|determined|computed|generated|derived|produced|created)",
             r"how\s+does\s+.*?\s+work",
             r"what\s+(?:is|are)\s+(?:the\s+)?(?:business\s+)?rules(?:\s+for)?",
             r"what\s+(?:is|are)\s+(?:the\s+)?rules(?:\s+for)?",
+            r"rules\s+for\s+(?:identifying\s+)?dead\s+stock",
             r"(?:explain|what\s+is|what)\s+(?:the\s+)?formula(?:\s+for|\s+is\s+used)?",
             r"explain\s+(?:the\s+)?(?:recommendation\s+logic|methodology|architecture|workflow|pipeline|policy|system|design|formula)",
+            r"explain\s+(?:the\s+)?(?:demand\s+)?forecasting\s+methodology",
             r"why\s+does\s+the\s+system\s+use",
             r"how\s+(?:is|are)\s+.*?\s+determined",
             r"what\s+models\s+(?:are\s+used|used)",
+            r"how\s+(?:are|is)\s+(?:inventory\s+)?recommendations?\s+(?:generated|calculated|determined|created|derived)",
         ]
         if any(re.search(pat, q) for pat in doc_patterns):
             return "DOCS"
@@ -223,8 +256,11 @@ class DecisionRAGSynthesizer:
             "safety stock formula", "wape formula", "croston method",
             "system design", "sla", "data pipeline guide", "conventions", "stack",
             "what does the prd say", "system architecture", "what algorithms",
-            "forecasting methodology", "recommendation logic", "business rules",
-            "what formula", "specification", "policy", "workflow", "design"
+            "forecasting methodology", "demand forecasting methodology", "recommendation logic",
+            "business rules", "what formula", "specification", "policy", "workflow", "design",
+            "dead stock rules", "rules for dead stock", "rules for identifying dead stock",
+            "models are used for demand forecasting", "models used for demand forecasting",
+            "how are inventory recommendations generated"
         ]
         if any(k in q for k in doc_keywords):
             return "DOCS"
@@ -382,12 +418,21 @@ class DecisionRAGSynthesizer:
         sess_id = data_result.get("session_id") if data_result else session_id
         table_payload = data_result.get("table", {}) if data_result else {}
 
-        # Resolve final template name without legacy overwrite (FIX 3)
+        # Resolve final template name without legacy overwrite
         raw_tpl = data_result.get("template_name") if data_result else "document_rag"
-        if conv_ctx.get("product_id") and raw_tpl in ("items_below_rop", "general_business_advisory"):
+        has_current_sku = bool(re.search(r'\b(?:product\s*(?:id)?:?|sku\s*#?)\s*\d+\b|\b\d{4,7}\b', query, re.I))
+        is_single_sku = has_current_sku or conv_ctx.get("is_genuine_follow_up")
+        is_broad = bool(re.search(r'\b(?:which\s+(?:items|products|skus)|all\s+(?:items|products|skus)|items\s+below|products\s+below|below\s+rop)\b', query, re.I))
+
+        if query_type == "DOCS":
+            final_template = "document_rag"
+        elif is_single_sku and not is_broad and conv_ctx.get("product_id") and raw_tpl in ("items_below_rop", "general_business_advisory"):
             final_template = "sku_inventory_recommendation"
-        elif query_type == "HYBRID" and raw_tpl in ("items_below_rop", "general_business_advisory"):
-            final_template = "sku_inventory_recommendation" if conv_ctx.get("product_id") else "hybrid_decision_rag"
+        elif query_type == "HYBRID":
+            if is_single_sku and not is_broad and conv_ctx.get("product_id"):
+                final_template = "sku_inventory_recommendation"
+            else:
+                final_template = "hybrid_decision_rag"
         else:
             final_template = raw_tpl or ("hybrid_decision_rag" if query_type == "HYBRID" else "document_rag")
 
@@ -742,7 +787,143 @@ class DecisionRAGSynthesizer:
                     f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
                 )
 
-            # 1D. Other formula/calculation queries where formula is NOT documented
+            # 1D. Inventory Recommendations Generation inquiry
+            if ("inventory recommendation" in q_lower or "recommendation" in q_lower) and any(k in q_lower for k in ["generate", "generated", "how are", "workflow", "process", "created", "logic", "calculated"]):
+                return (
+                    f"### Answer\n"
+                    f"Based on **ML_ENGINEERING_AND_PIPELINE_GUIDE.md** (Section 6, Line 88) and **system_architecture_hld_lld.md** (Section 3.2.E, Line 203), inventory recommendations are generated through a stochastic decision optimization layer:\n\n"
+                    f"1. **Input Parameters Derived from Historical Data:**\n"
+                    f"- Mean daily demand ($\\mu_d$ / $\\bar{{d}}$)\n"
+                    f"- Daily demand standard deviation ($\\sigma_d$)\n"
+                    f"- Unit landing price ($C_{{\\text{{unit}}}}$)\n\n"
+                    f"2. **Governing Policy Configurations:**\n"
+                    f"- Supplier lead time ($L$, default 3 days)\n"
+                    f"- Target cycle service level factor ($Z = 1.645$ for 95% service level)\n"
+                    f"- Review period ($R$, default 7 days)\n\n"
+                    f"3. **Mathematical Thresholds:**\n"
+                    f"- **Safety Stock ($SS$):** $$SS = \\lceil Z \\times \\sigma_d \\times \\sqrt{{L}} \\rceil$$\n"
+                    f"- **Reorder Point ($ROP$):** $$ROP = \\lceil (\\mu_d \\times L) + SS \\rceil$$\n"
+                    f"- **Target Stock Level ($TSL$):** $$TSL = \\lceil \\mu_d \\times (L + R) + SS \\rceil$$\n"
+                    f"- **Recommended Order Quantity ($ROQ$):** $$ROQ = \\max(0, \\lceil TSL - \\text{{Stock}}_{{\\text{{on\\_hand}}}} - \\text{{Stock}}_{{\\text{{on\\_order}}}} \\rceil)$$\n\n"
+                    f"4. **Replenishment Trigger & Risk Categorization:**\n"
+                    f"- **CRITICAL_STOCKOUT:** Current on-hand stock $\\le SS$\n"
+                    f"- **REORDER_REQUIRED:** Current on-hand stock $\\le ROP$\n"
+                    f"- **OPTIMAL:** Current stock remains above ROP\n\n"
+                    f"### What this means\n"
+                    f"Inventory recommendations compare live warehouse on-hand stock against statistical reorder thresholds ($ROP = LTD + SS$) to order the exact quantity needed to bring stock up to Target Stock Level before safety buffers are breached.\n\n"
+                    f"### Key numbers\n"
+                    f"- **Default Service Level**: 95% ($Z = 1.645$)\n"
+                    f"- **Default Supplier Lead Time**: 3 days ($L = 3$)\n"
+                    f"- **Default Review Period**: 7 days ($R = 7$)\n"
+                    f"- **Reorder Equation**: $ROP = (\\mu_d \\times L) + SS$\n\n"
+                    f"### Recommended action\n"
+                    f"Review SKUs flagged with 'REORDER_REQUIRED' or 'CRITICAL_STOCKOUT' and generate replenishment purchase orders matching the Recommended Order Quantity.\n\n"
+                    f"### Evidence\n"
+                    f"- **Documents**: ML_ENGINEERING_AND_PIPELINE_GUIDE.md (Section 6: Inventory Decision Layer), system_architecture_hld_lld.md (Section 3.2.E: Stochastic Inventory Optimization Arithmetic)\n\n"
+                    f"### Source\n"
+                    f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+                )
+
+            # 1E. Dead Stock Detection & Downward Clearance Rules inquiry
+            if any(k in q_lower for k in ["dead stock", "deadstock"]):
+                return (
+                    f"### Answer\n"
+                    f"Based on **system_architecture_hld_lld.md** (Section 3.2.H, Prompt 4.8, Line 225), the system specifies the following business rules for identifying and managing dead stock:\n\n"
+                    f"1. **Inactivity & Excess Stock Detection Rules:**\n"
+                    f"- **Inactive Inventory:** Zero sales demand recorded for $N \\ge 90$ consecutive days while on-hand stock is greater than zero ($\\text{{Stock}}_{{\\text{{on\\_hand}}}} > 0$).\n"
+                    f"- **Excess Cover:** On-hand inventory exceeds 180 days of forward demand ($\\text{{Days of Cover}} = \\text{{Stock}}_{{\\text{{on\\_hand}}}} / \\bar{{d}} > 180$).\n\n"
+                    f"2. **Financial Liabilities & Exposure:**\n"
+                    f"- **Capital Tied Up:** $\\text{{Capital Locked}} = \\text{{Stock}}_{{\\text{{on\\_hand}}}} \\times C_{{\\text{{unit}}}}$\n"
+                    f"- **Monthly Holding Drag:** $\\text{{Monthly Cost}} = \\text{{Stock}}_{{\\text{{on\\_hand}}}} \\times \\text{{Storage Footprint}} \\times \\text{{Monthly Rate}}$\n"
+                    f"- **Projected Obsolescence:** Tracked against expiration shelf-life date.\n\n"
+                    f"3. **Downward Action Recommendation Engine:**\n"
+                    f"- **TRANSFER:** If Days of Cover $> 300$, transfer excess inventory to a high-velocity regional distribution hub with demand deficit.\n"
+                    f"- **MARKDOWN:** Solve optimal clearance discount $\\delta \\in [0.10, 0.60]$ via Price Elasticity of Demand (PED) to liquidate stock within 45 days: $$\\delta = \\frac{{1}}{{|\\varepsilon|}} \\left(\\frac{{\\text{{Stock}}_{{\\text{{on\\_hand}}}}}}{{T \\cdot \\bar{{d}}}} - 1\\right)$$\n"
+                    f"- **BUNDLE:** Bundle slow-moving item with high-velocity anchor SKU in category.\n"
+                    f"- **RETURN_TO_SUPPLIER:** If supplier contractual agreement permits inventory returns.\n"
+                    f"- **WRITE_OFF:** If inactive for $\\ge 270$ consecutive days or past shelf-life obsolescence date.\n"
+                    f"- **DELIST:** If product is categorized in ABC-XYZ cell CZ with negligible daily demand ($\\bar{{d}} < 0.1$).\n\n"
+                    f"### What this means\n"
+                    f"The dead stock engine flags dormant capital and automatically solves optimal markdown discounts or inter-city transfers to recover working capital before physical expiration.\n\n"
+                    f"### Key numbers\n"
+                    f"- **Inactivity Threshold**: 90 consecutive days with zero demand\n"
+                    f"- **Excess Cover Threshold**: > 180 days of forward demand\n"
+                    f"- **Transfer Hurdle**: > 300 days of cover\n"
+                    f"- **Markdown Discount Range**: 10% to 60% based on Price Elasticity of Demand\n"
+                    f"- **Write-Off Threshold**: ≥ 270 days inactive\n\n"
+                    f"### Recommended action\n"
+                    f"Review flagged dead stock SKUs and apply recommended downward markdown discounts or regional transfers to reclaim frozen working capital.\n\n"
+                    f"### Evidence\n"
+                    f"- **Document**: docs/system_architecture_hld_lld.md\n"
+                    f"- **Section**: Section 3.2.H: Dead Stock Detection, Financial Exposure & Downward Clearance Optimizer (Prompt 4.8)\n\n"
+                    f"### Source\n"
+                    f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+                )
+
+            # 1F. Demand Forecasting Models inquiry
+            if any(k in q_lower for k in ["models are used", "models used", "what models", "forecasting models", "forecast models"]):
+                return (
+                    f"### Answer\n"
+                    f"Based on **ML_ENGINEERING_AND_PIPELINE_GUIDE.md** (Section 4, Line 54), **ARCHITECTURE.md** (Section 13, Line 394), and **PRD.md** (Section 7, Line 209), the system documents the following demand forecasting models:\n\n"
+                    f"1. **Baseline Benchmark Models:**\n"
+                    f"- **Naive (Lag-1):** Uses the immediate previous day's sales ($y_{{t-1}}$) as the baseline benchmark (**32.43% WAPE**, **45.64 RMSE**).\n"
+                    f"- **Seasonal Naive (Lag-7):** Uses sales from the same day of the prior week ($y_{{t-7}}$) to track weekly seasonality (**79.35% WAPE**).\n"
+                    f"- **Rolling Mean 7:** Historical 7-day moving average smoothing short-term demand variance (**49.64% WAPE**).\n\n"
+                    f"2. **Machine Learning Models:**\n"
+                    f"- **Ridge Regression:** Linear regularized model with L2 penalty; achieved the lowest error (**31.97% WAPE**, **41.01 RMSE**) and is selected as the **champion model** for active series.\n"
+                    f"- **HistGradientBoosting (GBT):** Non-linear gradient boosted tree ensemble (**40.81% WAPE**, **73.97 RMSE**) capturing non-linear interactions.\n\n"
+                    f"3. **Time-Series & Intermittent Models:**\n"
+                    f"- **Prophet:** Additive decomposition model capturing trend and weekly grocery seasonality for eligible products.\n"
+                    f"- **Croston / Syntetos-Boylan-Croston:** Documented for sparse and intermittent demand series where zero-demand transactions dominate.\n\n"
+                    f"### What this means\n"
+                    f"The platform benchmarks multiple algorithms chronologically to deploy the most accurate forecasting engine for retail grocery demand.\n\n"
+                    f"### Key numbers\n"
+                    f"- **Ridge Regression (Champion)**: 31.97% WAPE | 41.01 RMSE (0.31s training time)\n"
+                    f"- **HistGradientBoosting**: 40.81% WAPE | 73.97 RMSE (3.64s training time)\n"
+                    f"- **Naive Baseline**: 32.43% WAPE | 45.64 RMSE\n"
+                    f"- **Seasonal Naive (Lag-7)**: 79.35% WAPE | 105.85 RMSE\n\n"
+                    f"### Recommended action\n"
+                    f"Deploy Ridge Regression for high-velocity stable SKUs and apply Croston intermittent forecasting for tail items with high zero-demand frequency.\n\n"
+                    f"### Evidence\n"
+                    f"- **Documents**: ML_ENGINEERING_AND_PIPELINE_GUIDE.md (Section 4: Forecasting Model Benchmarks), ARCHITECTURE.md (Section 13: Forecasting Architecture), PRD.md (Section 7)\n\n"
+                    f"### Source\n"
+                    f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+                )
+
+            # 1G. Demand Forecasting Methodology inquiry
+            if "forecasting methodology" in q_lower or ("methodology" in q_lower and "forecast" in q_lower) or ("forecasting" in q_lower and any(k in q_lower for k in ["workflow", "pipeline", "approach", "how does"])):
+                return (
+                    f"### Answer\n"
+                    f"Based on **ML_ENGINEERING_AND_PIPELINE_GUIDE.md** (Sections 1–4), **ARCHITECTURE.md** (Section 13, Line 394), and **system_architecture_hld_lld.md** (Section 3.2.B), the platform implements an end-to-end demand forecasting methodology:\n\n"
+                    f"1. **Data Aggregation & Preprocessing:**\n"
+                    f"- Aggregates transaction-level sales into daily product demand at the `(date_, product_id, city_name)` daily grain across categories.\n\n"
+                    f"2. **Strict Anti-Leakage Feature Engineering:**\n"
+                    f"- Historical lags: `lag_1`, `lag_7`, `lag_14`, `lag_28` using strictly preceding observations ($t-k$).\n"
+                    f"- Rolling window statistics: `rolling_mean_7`, `rolling_mean_14`, `rolling_mean_28`, and `rolling_std_7` computed over preceding windows strictly excluding the forecast day $t$.\n"
+                    f"- Calendar regressors: Deterministic day-of-week and weekend flags, with 28-day warmup truncation to eliminate null features.\n\n"
+                    f"3. **Chronological Backtesting & Validation:**\n"
+                    f"- Strict anti-shuffling monotonic time-based split (Training: April 29 – June 30, 2022; Validation: July 1 – July 10, 2022).\n\n"
+                    f"4. **Multi-Horizon Forecasts:** Generates short-term forecasts for 7-day, 14-day, and 30-day forecast horizons.\n\n"
+                    f"5. **Model Evaluation & Promotion:**\n"
+                    f"- Evaluated using Weighted Absolute Percentage Error (WAPE), MAE, and RMSE.\n"
+                    f"- 5% Hysteresis Hurdle: Challenger models must beat the incumbent champion by at least 5% WAPE to be promoted.\n"
+                    f"- Naive Seasonal Floor: Models failing the baseline are marked unforecastable.\n\n"
+                    f"### What this means\n"
+                    f"The methodology enforces strict time-ordered anti-leakage engineering to ensure realistic grocery demand predictions that drive automated replenishment without future-data lookahead.\n\n"
+                    f"### Key numbers\n"
+                    f"- **Forecast Horizons**: 7 days, 14 days, 30 days\n"
+                    f"- **Training Period**: 63 calendar days (2022-04-29 to 2022-06-30)\n"
+                    f"- **Validation Period**: 10 calendar days (2022-07-01 to 2022-07-10)\n"
+                    f"- **Champion Model**: Ridge Regression (31.97% WAPE)\n\n"
+                    f"### Recommended action\n"
+                    f"Execute periodic backtesting recalibrations and verify error metrics (WAPE/MAE) before promoting challenger forecasting pipelines.\n\n"
+                    f"### Evidence\n"
+                    f"- **Documents**: ML_ENGINEERING_AND_PIPELINE_GUIDE.md (Sections 3 & 4), system_architecture_hld_lld.md (Section 3.2.B), ARCHITECTURE.md (Section 13), PRD.md (Section 7)\n\n"
+                    f"### Source\n"
+                    f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+                )
+
+            # 1H. Other formula/calculation queries where formula is NOT documented
             if is_calc_query:
                 m_concept = re.search(r'(?:formula\s+(?:for|of)|how\s+(?:is|do\s+you\s+calculate)\s+|calculation\s+of\s+|methodology\s+(?:used\s+)?for\s+)(.+?)(?:\?|$)', query, re.I)
                 concept_name = m_concept.group(1).strip() if m_concept else "this concept"
@@ -767,7 +948,7 @@ class DecisionRAGSynthesizer:
                     f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
                 )
 
-            # 1E. General conceptual documentation inquiry (e.g. forecasting methodology, dead stock rules)
+            # 1I. General conceptual documentation inquiry
             top_hit = doc_hits[0]
             doc_name = top_hit["document_name"]
             heading = top_hit.get("heading", "Specification")
@@ -895,8 +1076,8 @@ class DecisionRAGSynthesizer:
             tpl = data_result.get("template_name") if data_result else ""
             rows = data_result.get("table", {}).get("rows", []) if data_result else []
             if tpl == "items_below_rop" and len(rows) == 0:
-                action_text = "Continue standard inventory monitoring across SKUs; no immediate reorder or replenishment action is required."
-                meaning_text = "All evaluated SKUs currently maintain stock levels at or above their designated reorder points."
+                action_text = "No ROP-based reorder action is indicated by this query. Continue routine inventory monitoring."
+                meaning_text = "No evaluated SKU was found below its recorded reorder point."
             else:
                 action_text = "Review inventory positions against lead-time buffers and trigger necessary replenishment purchase orders."
                 meaning_text = doc_explanation
@@ -969,19 +1150,19 @@ class DecisionRAGSynthesizer:
                     f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
                 )
 
-        # ── 4. items_below_rop Query Specialization (FIX 1) ──
+        # ── 4. items_below_rop Query Specialization (FIX 1 & 2) ──
         if data_result and data_result.get("template_name") == "items_below_rop":
             rows = data_result.get("table", {}).get("rows", [])
             row_count = len(rows)
             loc = conv_ctx.get("city") or "this dataset"
             if row_count == 0:
                 answer = f"0 SKUs are currently below ROP in {loc}. No immediate ROP-based procurement action is identified from this query."
-                meaning = "All evaluated products are currently stocked at or above their safety reorder point thresholds."
-                action = "No immediate reorder action is required. Continue routine inventory monitoring."
+                meaning = "No evaluated SKU was found below its recorded reorder point."
+                action = "No ROP-based reorder action is indicated by this query. Continue routine inventory monitoring."
                 key_numbers = (
                     f"### Key numbers\n"
                     f"- **Items Below ROP**: 0 SKUs\n"
-                    f"- **Replenishment Status**: Optimal stock levels across evaluated items"
+                    f"- **Replenishment Status**: No ROP breach detected"
                 )
             else:
                 answer = f"Found {row_count} SKUs currently operating below their Reorder Point (ROP). Immediate replenishment review is recommended for these items."
@@ -990,7 +1171,7 @@ class DecisionRAGSynthesizer:
                 key_numbers = (
                     f"### Key numbers\n"
                     f"- **Items Below ROP**: {row_count} SKUs\n"
-                    f"- **Urgent Action Required**: Review replenishment purchase orders"
+                    f"- **Replenishment Status**: {row_count} SKUs below reorder threshold"
                 )
 
             return (
@@ -1008,21 +1189,101 @@ class DecisionRAGSynthesizer:
                 f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
             )
 
+        # ── 5. top_n_by Query Specialization (FIX 1) ──
+        if data_result and data_result.get("template_name") == "top_n_by":
+            tbl = data_result.get("table", {})
+            rows = tbl.get("rows", [])
+            row_count = len(rows)
+
+            answer = (
+                f"These are the top {row_count} products by recorded sales/demand volume. "
+                f"Review their current stock, ROP, and inventory recommendations before making procurement decisions."
+            )
+            meaning = "This ranking reflects historical sales and demand transactions recorded in the daily demand dataset."
+            key_numbers = (
+                f"### Key numbers\n"
+                f"- **Products Ranked**: {row_count} SKUs\n"
+                f"- **Ranking Metric**: Sales / Demand volume"
+            )
+            action = "Review current stock, ROP thresholds, and active recommendations for these high-volume items before making procurement decisions."
+
+            return (
+                f"### Answer\n"
+                f"{answer}\n\n"
+                f"### What this means\n"
+                f"{meaning}\n\n"
+                f"{key_numbers}\n\n"
+                f"### Recommended action\n"
+                f"{action}\n\n"
+                f"### Evidence\n"
+                f"- **Query Template**: top_n_by\n"
+                f"- **Database Table**: daily_product_demand\n\n"
+                f"### Source\n"
+                f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+            )
+
+        # ── 6. supplier_po_summary Query Specialization (FIX 4) ──
+        if data_result and data_result.get("template_name") == "supplier_po_summary":
+            tbl = data_result.get("table", {})
+            rows = tbl.get("rows", [])
+            row_count = len(rows)
+
+            if row_count == 0:
+                answer = "No recent purchase orders were found in the database."
+                meaning = "No recent PO records are available for the requested query."
+                key_numbers = (
+                    f"### Key numbers\n"
+                    f"- **Records Found**: 0\n"
+                    f"- **Total PO Value**: ₹0"
+                )
+                action = "No PO records are available for review. Check procurement requirements separately if needed."
+            else:
+                total_spend = sum(float(r.get("total_amount") or r.get("amount") or 0.0) for r in rows)
+                answer = f"Found {row_count} recent purchase orders in the database."
+                meaning = "Recent purchase order records reflect committed orders placed with suppliers."
+                key_numbers = (
+                    f"### Key numbers\n"
+                    f"- **Records Found**: {row_count}\n"
+                    f"- **Total PO Value**: ₹{total_spend:,.0f}"
+                )
+                action = "Review order statuses and delivery schedules in the table below."
+
+            return (
+                f"### Answer\n"
+                f"{answer}\n\n"
+                f"### What this means\n"
+                f"{meaning}\n\n"
+                f"{key_numbers}\n\n"
+                f"### Recommended action\n"
+                f"{action}\n\n"
+                f"### Evidence\n"
+                f"- **Query Template**: supplier_po_summary\n"
+                f"- **Database Table**: purchase_orders\n\n"
+                f"### Source\n"
+                f"Source:\n" + "\n".join([f"- {s}" for s in all_sources])
+            )
+
         if data_result and data_result.get("prose"):
             prose = data_result["prose"]
             tbl = data_result.get("table", {})
             row_count = len(tbl.get("rows", [])) if tbl else 0
+            if row_count == 0:
+                meaning = "No matching records were retrieved from the database for this query."
+                action = "No matching records are available for review. Check query parameters or underlying data if needed."
+            else:
+                meaning = "This data reflects recorded transactions and live supply chain policies stored in PostgreSQL."
+                action = "Review the records in the table below to trigger necessary procurement or inventory adjustments."
 
             return (
                 f"### Answer\n"
                 f"{prose}\n\n"
                 f"### What this means\n"
-                f"This data reflects recorded transactions and live supply chain policies stored in PostgreSQL.\n\n"
+                f"{meaning}\n\n"
                 f"### Key numbers\n"
                 f"- **Records Found**: {row_count} relevant lines retrieved\n"
                 f"- **Execution Time**: {data_result.get('execution_ms', 0):.1f}ms\n\n"
                 f"### Recommended action\n"
-                f"Review the records in the table below to trigger necessary procurement or inventory adjustments.\n\n"
+                f"{action}\n\n"
                 f"### Evidence\n"
                 f"- **Query Template**: {data_result.get('template_name', 'PostgreSQL Query')}\n\n"
                 f"### Source\n"

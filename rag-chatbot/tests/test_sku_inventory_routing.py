@@ -366,3 +366,289 @@ def test_unspecified_calculation_formula_clean_rejection(db_session):
     assert res["query_type"] == "DOCS"
     assert "The current project documentation does not specify a complete calculation formula" in res["prose"]
 
+
+# ==============================================================================
+# DATA QA ROUND FOCUSED TESTS (Issues 1 - 4)
+# ==============================================================================
+
+def test_top_n_demand_sales_response_neutral_wording(db_session):
+    """
+    QA Issue 1: Top-N sales/demand response must keep factual ranking
+    and use neutral wording without unsupported procurement claims ('hamesha', 'always').
+    """
+    queries = [
+        "Show me the top 10 products by demand.",
+        "Show me the top 10 SKUs by sales volume."
+    ]
+    for q in queries:
+        res = decision_rag_synthesizer.synthesize(db=db_session, query=q)
+        assert res["status"] == "success"
+        assert res["query_type"] == "DATA"
+        assert res["template_name"] == "top_n_by"
+        assert len(res["table"]["rows"]) == 10
+
+        prose = res["prose"]
+        assert "These are the top 10 products by recorded sales/demand volume." in prose
+        assert "Review their current stock, ROP, and inventory recommendations before making procurement decisions." in prose
+        assert "hamesha" not in prose.lower()
+        assert "always" not in prose.lower()
+
+
+def test_zero_below_rop_exact_wording(db_session):
+    """
+    QA Issue 2: Zero below-ROP query must state 0 SKUs below ROP and 'No ROP breach detected',
+    without falsely claiming inventory is 'optimal'.
+    """
+    res = decision_rag_synthesizer.synthesize(db=db_session, query="Which items are currently below ROP?")
+    assert res["status"] == "success"
+    assert res["query_type"] == "DATA"
+    assert res["template_name"] == "items_below_rop"
+    assert len(res["table"]["rows"]) == 0
+
+    prose = res["prose"]
+    assert "0 SKUs are currently below ROP in this dataset. No immediate ROP-based procurement action is identified from this query." in prose
+    assert "No evaluated SKU was found below its recorded reorder point." in prose
+    assert "Items Below ROP" in prose and "0 SKUs" in prose
+    assert "Replenishment Status" in prose and "No ROP breach detected" in prose
+    assert "No ROP-based reorder action is indicated by this query. Continue routine inventory monitoring." in prose
+    assert "optimal" not in prose.lower()
+    assert "urgent" not in prose.lower()
+
+
+def test_natural_language_highest_demand_routing_variations(db_session):
+    """
+    QA Issue 3: Natural language demand-ranking variations without explicit numeric SKUs
+    must all route through the existing top_n_by template without errors.
+    """
+    variations = [
+        "Which products have the highest demand?",
+        "Which products have the highest sales?",
+        "Show me the top products by demand.",
+        "Show me the top 10 products by demand.",
+        "What are the highest-demand products?",
+        "Which SKUs have the highest demand?",
+    ]
+    for q in variations:
+        res = decision_rag_synthesizer.synthesize(db=db_session, query=q)
+        assert res["status"] == "success", f"Query '{q}' failed: {res}"
+        assert res["query_type"] == "DATA", f"Query '{q}' had wrong query_type: {res.get('query_type')}"
+        assert res["template_name"] == "top_n_by", f"Query '{q}' had wrong template: {res.get('template_name')}"
+        assert len(res["table"]["rows"]) > 0, f"Query '{q}' returned 0 rows"
+        assert "These are the top" in res["prose"]
+        assert "error" not in res["prose"].lower()
+
+
+def test_zero_purchase_orders_response_wording(db_session):
+    """
+    QA Issue 4: Zero purchase order result must state no recent POs were found,
+    Total PO Value: ₹0, and must NOT tell user to review an empty table.
+    """
+    res = decision_rag_synthesizer.synthesize(db=db_session, query="Show me recent purchase orders.")
+    assert res["status"] == "success"
+    assert res["query_type"] == "DATA"
+    assert res["template_name"] == "supplier_po_summary"
+    assert len(res["table"]["rows"]) == 0
+
+    prose = res["prose"]
+    assert "No recent purchase orders were found in the database." in prose
+    assert "No recent PO records are available for the requested query." in prose
+    assert "Records Found" in prose and ": 0" in prose
+    assert "Total PO Value" in prose and "₹0" in prose
+    assert "No PO records are available for review. Check procurement requirements separately if needed." in prose
+    assert "table below" not in prose.lower()
+
+
+# ==============================================================================
+# STEP 3 QA REGRESSION TESTS (A through G)
+# ==============================================================================
+
+def test_step3_issue1_general_query_after_sku_context(db_session):
+    """
+    Test A: General query after SKU context must NOT inherit SKU 19512.
+    Previous: "Why is SKU 19512 recommended for reorder?"
+    Current:  "Which items are currently below ROP?"
+    Expected: items_below_rop (NOT sku_inventory_recommendation)
+    """
+    t1 = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="Why is SKU 19512 recommended for reorder?"
+    )
+    assert t1["status"] == "success"
+    assert t1["query_type"] == "HYBRID"
+    assert t1["template_name"] == "sku_inventory_recommendation"
+    sess_id = t1["session_id"]
+
+    t2 = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="Which items are currently below ROP?",
+        session_id=sess_id
+    )
+    assert t2["status"] == "success"
+    assert t2["query_type"] == "DATA"
+    assert t2["template_name"] == "items_below_rop"
+    assert t2["template_name"] != "sku_inventory_recommendation"
+    assert "19512" not in t2["prose"]
+
+
+def test_step3_issue2_dead_stock_docs_query(db_session):
+    """
+    Test B: Dead-stock DOCS query.
+    Query: "What are the rules for identifying dead stock?"
+    Expected:
+    - Route = DOCS
+    - Template = document_rag
+    - Relevant dead-stock documentation retrieved (system_architecture_hld_lld.md Line 225)
+    - Cites documented thresholds (90 days inactivity, 180 days excess cover)
+    - Does NOT invent generic inventory rules
+    """
+    res = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="What are the rules for identifying dead stock?"
+    )
+    assert res["status"] == "success"
+    assert res["query_type"] == "DOCS"
+    assert res["template_name"] == "document_rag"
+    assert res["template_name"] != "sku_inventory_recommendation"
+
+    doc_names = [d.get("document_name") for d in res.get("document_sources", [])]
+    assert any("system_architecture_hld_lld.md" in d for d in doc_names)
+
+    prose = res["prose"]
+    assert "90" in prose  # 90-day inactivity threshold
+    assert "180" in prose  # 180-day excess cover threshold
+    assert "system_architecture_hld_lld.md" in prose
+    assert "19512" not in prose
+
+
+def test_step3_issue3_forecasting_methodology_docs_query(db_session):
+    """
+    Test C: Forecasting methodology.
+    Query: "Explain the demand forecasting methodology used in this project."
+    Expected:
+    - Route = DOCS
+    - Template = document_rag
+    - Relevant methodology/pipeline evidence across documents
+    - Anti-leakage lags and chronological backtesting documented
+    """
+    res = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="Explain the demand forecasting methodology used in this project."
+    )
+    assert res["status"] == "success"
+    assert res["query_type"] == "DOCS"
+    assert res["template_name"] == "document_rag"
+
+    prose = res["prose"]
+    assert "anti-leakage" in prose.lower() or "leakage" in prose.lower()
+    assert "backtesting" in prose.lower() or "chronological" in prose.lower()
+    assert any(h in prose for h in ["7", "14", "30"])  # forecast horizons
+    assert "19512" not in prose
+
+
+def test_step3_issue4_forecasting_models_docs_query(db_session):
+    """
+    Test D: Forecasting models.
+    Query: "What models are used for demand forecasting?"
+    Expected:
+    - Route = DOCS
+    - Template = document_rag
+    - Actual documented model names: Ridge Regression, Naive, Seasonal Naive, HistGradientBoosting, Prophet, Croston
+    """
+    res = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="What models are used for demand forecasting?"
+    )
+    assert res["status"] == "success"
+    assert res["query_type"] == "DOCS"
+    assert res["template_name"] == "document_rag"
+
+    prose = res["prose"]
+    assert "Ridge" in prose
+    assert "Naive" in prose
+    assert "Prophet" in prose
+    assert "HistGradientBoosting" in prose or "GBT" in prose
+
+
+def test_step3_issue5_inventory_recommendation_generation_docs_query(db_session):
+    """
+    Test E: Inventory recommendation methodology.
+    Query: "How are inventory recommendations generated?"
+    Expected:
+    - Route = DOCS
+    - Template = document_rag
+    - Relevant inventory decision documentation (SS, ROP, TSL, Lead Time)
+    - Does NOT return SKU-specific database information unless explicitly asked
+    """
+    res = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="How are inventory recommendations generated?"
+    )
+    assert res["status"] == "success"
+    assert res["query_type"] == "DOCS"
+    assert res["template_name"] == "document_rag"
+    assert res["template_name"] != "sku_inventory_recommendation"
+
+    prose = res["prose"]
+    assert "ROP" in prose or "Reorder Point" in prose
+    assert "Safety Stock" in prose or "SS" in prose
+    assert "19512" not in prose
+
+
+def test_step3_genuine_followup_preserves_sku_context(db_session):
+    """
+    Test F: Genuine follow-up after SKU context must preserve the SKU.
+    Previous: "Tell me about SKU 19512."
+    Current:  "What is its reorder point?"
+    Expected: SKU 19512 context preserved and addressed.
+    """
+    t1 = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="Tell me about SKU 19512."
+    )
+    sess_id = t1["session_id"]
+    assert sess_id is not None
+
+    t2 = decision_rag_synthesizer.synthesize(
+        db=db_session,
+        query="What is its reorder point?",
+        session_id=sess_id
+    )
+    assert t2["status"] == "success"
+    assert t2["template_name"] == "sku_inventory_recommendation"
+    assert "19512" in t2["prose"]
+
+
+def test_step3_existing_working_docs_and_hybrid_queries(db_session):
+    """
+    Test G: Existing working queries must continue passing:
+    - "How is safety stock calculated?" -> DOCS, document_rag
+    - "What is the formula for safety stock?" -> DOCS, document_rag
+    - "How is reorder point calculated?" -> DOCS, document_rag
+    - "Why is SKU 19512 recommended for reorder?" -> HYBRID, sku_inventory_recommendation
+    """
+    # 1. How is safety stock calculated?
+    r1 = decision_rag_synthesizer.synthesize(db=db_session, query="How is safety stock calculated?")
+    assert r1["query_type"] == "DOCS"
+    assert r1["template_name"] == "document_rag"
+    assert "King's Formula" in r1["prose"]
+
+    # 2. What is the formula for safety stock?
+    r2 = decision_rag_synthesizer.synthesize(db=db_session, query="What is the formula for safety stock?")
+    assert r2["query_type"] == "DOCS"
+    assert r2["template_name"] == "document_rag"
+    assert "King's Formula" in r2["prose"]
+
+    # 3. How is reorder point calculated?
+    r3 = decision_rag_synthesizer.synthesize(db=db_session, query="How is reorder point calculated?")
+    assert r3["query_type"] == "DOCS"
+    assert r3["template_name"] == "document_rag"
+    assert "ROP" in r3["prose"]
+
+    # 4. Why is SKU 19512 recommended for reorder?
+    r4 = decision_rag_synthesizer.synthesize(db=db_session, query="Why is SKU 19512 recommended for reorder?")
+    assert r4["query_type"] == "HYBRID"
+    assert r4["template_name"] == "sku_inventory_recommendation"
+    assert "19512" in r4["prose"]
+
+
+
