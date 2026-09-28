@@ -178,9 +178,14 @@ def test_fix_2_hybrid_document_search_query_expansion():
     assert "forecasting" in doc_fc.lower() or "forecast" in doc_fc.lower()
     assert "methodology" in doc_fc.lower() or "accuracy" in doc_fc.lower()
 
-    # DOCS query should be returned unchanged
-    docs_q = "How is safety stock and reorder point calculated?"
+    # Non-calculation DOCS query should be returned unchanged
+    docs_q = "What are the business rules for dead stock clearance?"
     assert build_document_search_query(docs_q, query_type="DOCS") == docs_q
+
+    # Calculation/formula DOCS query should be enriched with formula terms
+    calc_q = "How is safety stock calculated?"
+    calc_enriched = build_document_search_query(calc_q, query_type="DOCS")
+    assert any(t in calc_enriched for t in ["calculation", "formula", "methodology", "equation", "inputs"])
 
 
 def test_fix_2_hybrid_retrieval_sku_retention_in_sql(db_session, monkeypatch):
