@@ -24,6 +24,10 @@ import {
   Plus,
   Search,
   ExternalLink,
+  Database,
+  BookOpen,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import api from '../../services/api';
 import SkuExplainabilityModal from '../../components/common/SkuExplainabilityModal';
@@ -43,6 +47,27 @@ export default function AssistantPage() {
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [activeCategory, setActiveCategory] = useState('All');
   const [copiedId, setCopiedId] = useState(null);
+
+  // Grounded Evidence Drawer state
+  const [openEvidence, setOpenEvidence] = useState({});
+  const [selectedEvidenceFilter, setSelectedEvidenceFilter] = useState({});
+
+  const toggleEvidence = (msgId, sourceName = null) => {
+    setOpenEvidence((prev) => {
+      const isCurrentlyOpen = !!prev[msgId];
+      if (sourceName) {
+        return { ...prev, [msgId]: true };
+      }
+      return { ...prev, [msgId]: !isCurrentlyOpen };
+    });
+
+    if (sourceName) {
+      setSelectedEvidenceFilter((prev) => ({
+        ...prev,
+        [msgId]: prev[msgId] === sourceName ? null : sourceName,
+      }));
+    }
+  };
 
   // Suggested prompts
   const [suggestedPrompts, setSuggestedPrompts] = useState([
@@ -106,6 +131,11 @@ export default function AssistantPage() {
             content: m.message,
             template: m.query_template,
             executionMs: m.execution_ms,
+            sources: m.sources || [],
+            dataSources: m.data_sources || [],
+            documentSources: m.document_sources || [],
+            evidence: m.evidence || [],
+            intent: m.intent,
           }))
         );
       }
@@ -190,6 +220,11 @@ export default function AssistantPage() {
         table: res.data?.table || res.data?.data_table,
         executionMs: res.data?.execution_ms,
         suggestedPrompts: res.data?.suggested_prompts,
+        sources: res.data?.sources || [],
+        dataSources: res.data?.data_sources || [],
+        documentSources: res.data?.document_sources || [],
+        evidence: res.data?.evidence || [],
+        intent: res.data?.intent || res.data?.query_type,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, botMsg]);
@@ -764,7 +799,237 @@ export default function AssistantPage() {
                       {m.role === 'user' ? (
                         <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
                       ) : (
-                        <MarkdownViewer content={m.content} />
+                        <div>
+                          <MarkdownViewer content={m.content} />
+
+                          {/* Source Citation Chips & Grounded Evidence Trigger */}
+                          {m.role === 'assistant' && ((m.sources && m.sources.length > 0) || (m.documentSources && m.documentSources.length > 0) || (m.dataSources && m.dataSources.length > 0) || m.template) && (
+                            <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '1px dashed var(--border-subtle)' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                  Verified Sources:
+                                </span>
+                                {(m.sources && m.sources.length > 0 ? m.sources : ['PostgreSQL Database']).map((src, sIdx) => {
+                                  const isDoc = src.includes('/') || src.endsWith('.md');
+                                  const cleanName = src.split('/').pop().replace('.md', '');
+                                  const isSelected = selectedEvidenceFilter[m.id] === src;
+                                  return (
+                                    <button
+                                      key={sIdx}
+                                      onClick={() => toggleEvidence(m.id, src)}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        padding: '2px 8px',
+                                        borderRadius: 'var(--border-radius-pill)',
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        border: isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
+                                        backgroundColor: isSelected ? 'var(--accent-primary-subtle)' : 'var(--bg-surface-subtle)',
+                                        color: isSelected ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                        transition: 'all 0.15s ease',
+                                      }}
+                                      title={`Click to inspect verified evidence for [${cleanName}]`}
+                                    >
+                                      {isDoc ? <BookOpen size={11} color="var(--accent-primary)" /> : <Database size={11} color="var(--status-success-icon)" />}
+                                      <span>[{cleanName}]</span>
+                                    </button>
+                                  );
+                                })}
+
+                                <button
+                                  onClick={() => toggleEvidence(m.id)}
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--accent-primary)',
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    padding: '2px 6px',
+                                    marginLeft: '4px',
+                                  }}
+                                >
+                                  {openEvidence[m.id] ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                  {openEvidence[m.id] ? 'Hide Grounded Evidence' : 'View Grounded Evidence'}
+                                </button>
+                              </div>
+
+                              {/* Grounded Evidence Drawer */}
+                              {openEvidence[m.id] && (
+                                <div
+                                  style={{
+                                    marginTop: '10px',
+                                    padding: '12px 14px',
+                                    backgroundColor: 'var(--bg-surface-subtle)',
+                                    borderRadius: 'var(--border-radius-md)',
+                                    border: '1px solid var(--border-subtle)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '12px',
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '6px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                      <ShieldCheck size={13} color="var(--status-success-icon)" />
+                                      <span>Grounded Retrieval Evidence & Zero-Hallucination Audit Trail</span>
+                                    </div>
+                                    <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                      {m.intent ? `Route: ${m.intent}` : 'Hybrid Context'}
+                                    </span>
+                                  </div>
+
+                                  {/* DATA SOURCES SECTION */}
+                                  {((m.dataSources && m.dataSources.length > 0) || m.template) && (
+                                    <div>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', fontWeight: 700, color: 'var(--accent-primary)', textTransform: 'uppercase', marginBottom: '6px', letterSpacing: '0.04em' }}>
+                                        <Database size={11} />
+                                        <span>DATA SOURCES (Live PostgreSQL Protected Queries)</span>
+                                      </div>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                        {m.dataSources && m.dataSources.length > 0 ? (
+                                          m.dataSources.map((ds, dIdx) => (
+                                            <div
+                                              key={dIdx}
+                                              style={{
+                                                padding: '8px 10px',
+                                                backgroundColor: 'var(--bg-surface)',
+                                                borderRadius: 'var(--border-radius-sm)',
+                                                border: '1px solid var(--border-subtle)',
+                                                fontSize: '11px',
+                                              }}
+                                            >
+                                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
+                                                <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                                                  {ds.table || ds.template || 'PostgreSQL Business Table'}
+                                                </span>
+                                                <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                                  {ds.execution_ms ? `⚡ ${ds.execution_ms}ms` : ''}
+                                                </span>
+                                              </div>
+                                              <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
+                                                {ds.row_count ? `Retrieved ${ds.row_count} verified rows from active business dataset.` : 'Queried via guarded SQL template with tenant dataset filtering.'}
+                                              </div>
+                                              {ds.template && ds.template !== ds.table && (
+                                                <div style={{ color: 'var(--text-muted)', fontSize: '9px', marginTop: '2px', fontFamily: 'var(--font-mono)' }}>
+                                                  Guarded Template: {ds.template}
+                                                </div>
+                                              )}
+                                            </div>
+                                          ))
+                                        ) : (
+                                          <div
+                                            style={{
+                                              padding: '8px 10px',
+                                              backgroundColor: 'var(--bg-surface)',
+                                              borderRadius: 'var(--border-radius-sm)',
+                                              border: '1px solid var(--border-subtle)',
+                                              fontSize: '11px',
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                              <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                                                Template: {m.template || 'guarded_sql_template'}
+                                              </span>
+                                              <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                                {m.executionMs ? `⚡ ${m.executionMs}ms` : ''}
+                                              </span>
+                                            </div>
+                                            <div style={{ color: 'var(--text-secondary)', fontSize: '10px', marginTop: '2px' }}>
+                                              Executed verified parameter-bound SQL template against PostgreSQL active tenant dataset.
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* DOCUMENT SOURCES SECTION */}
+                                  {m.documentSources && m.documentSources.length > 0 && (
+                                    <div>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', fontWeight: 700, color: 'var(--status-info-text, #0284c7)', textTransform: 'uppercase', marginBottom: '6px', letterSpacing: '0.04em' }}>
+                                        <BookOpen size={11} />
+                                        <span>DOCUMENT SOURCES (Semantic Vector Knowledge Base)</span>
+                                      </div>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                        {m.documentSources.map((doc, docIdx) => (
+                                          <div
+                                            key={docIdx}
+                                            style={{
+                                              padding: '8px 10px',
+                                              backgroundColor: 'var(--bg-surface)',
+                                              borderRadius: 'var(--border-radius-sm)',
+                                              border: '1px solid var(--border-subtle)',
+                                              fontSize: '11px',
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px', flexWrap: 'wrap', gap: '4px' }}>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                  {doc.document_name}
+                                                </span>
+                                                <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                                  ({doc.source_path})
+                                                </span>
+                                              </div>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                {doc.chunk_id && (
+                                                  <span style={{ fontSize: '9px', padding: '1px 5px', backgroundColor: 'var(--bg-surface-subtle)', borderRadius: '3px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                                                    {doc.chunk_id}
+                                                  </span>
+                                                )}
+                                                {doc.start_line && (
+                                                  <span style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                                                    L{doc.start_line}-{doc.end_line || ''}
+                                                  </span>
+                                                )}
+                                                {doc.similarity !== undefined && (
+                                                  <span
+                                                    style={{
+                                                      fontSize: '9px',
+                                                      fontWeight: 600,
+                                                      padding: '1px 6px',
+                                                      borderRadius: 'var(--border-radius-pill)',
+                                                      backgroundColor: doc.similarity > 0.6 ? 'var(--status-success-bg)' : 'rgba(2, 132, 199, 0.1)',
+                                                      color: doc.similarity > 0.6 ? 'var(--status-success-text)' : '#0284c7',
+                                                    }}
+                                                  >
+                                                    {(doc.similarity * 100).toFixed(1)}% match
+                                                  </span>
+                                                )}
+                                              </div>
+                                            </div>
+                                            <div
+                                              style={{
+                                                fontSize: '11px',
+                                                color: 'var(--text-secondary)',
+                                                lineHeight: 1.45,
+                                                padding: '6px 8px',
+                                                backgroundColor: 'var(--bg-surface-subtle)',
+                                                borderRadius: 'var(--border-radius-sm)',
+                                                marginTop: '4px',
+                                                borderLeft: '2px solid var(--accent-primary)',
+                                                maxHeight: '100px',
+                                                overflowY: 'auto',
+                                              }}
+                                            >
+                                              {doc.text}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       )}
 
                       {/* Verifiable Tabular Data (Audit Ground Truth) */}

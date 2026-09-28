@@ -153,6 +153,7 @@ app.include_router(dead_stock.router, prefix=f"{settings.API_V1_STR}/dead-stock"
 app.include_router(calendar.router, prefix=f"{settings.API_V1_STR}/calendar", tags=["Indian Festival Calendar & Regressors"])
 app.include_router(explain.router, prefix=f"{settings.API_V1_STR}/explain", tags=["Per-SKU Explainability"])
 app.include_router(assistant.router, prefix=f"{settings.API_V1_STR}/assistant", tags=["Guarded NL Assistant"])
+app.include_router(assistant.router, prefix="/api/v1/assistant", tags=["Guarded NL Assistant V1"])
 app.include_router(digests.router, prefix=f"{settings.API_V1_STR}/digests", tags=["Weekly Narrative Digests"])
 app.include_router(quality.router, prefix=f"{settings.API_V1_STR}/quality", tags=["Data Quality Scorecard"])
 app.include_router(admin.router, prefix=settings.API_V1_STR, tags=["Observability & Admin"])

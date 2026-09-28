@@ -3,6 +3,7 @@ Guarded Natural Language Query API Router (Prompt 5.5)
 Project: Demand-Decision-Intelligence
 """
 
+import json
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException, Depends, status
 from pydantic import BaseModel, Field
@@ -13,6 +14,7 @@ from backend.core.deps import get_current_user_or_guest
 from backend.models.user import User
 from backend.models.chat import ChatSession, ChatMessage
 from backend.services.nl_query_service import handle_user_natural_language_query
+from backend.services.rag_adapter import rag_synthesizer as decision_rag_synthesizer
 
 router = APIRouter()
 
@@ -30,16 +32,16 @@ def ask_assistant(
     current_user: Optional[User] = Depends(get_current_user_or_guest),
 ):
     """
-    Guarded Natural Language Q&A over the user's data:
-    1. Blocks free-form SQL generation.
-    2. Strictly maps query to parameterized templates.
-    3. Server-side binds caller's dataset_id scope.
-    4. Returns natural language prose AND verifiable tabular/chart data.
+    Hybrid RAG Q&A over live PostgreSQL business data and verified project documentation:
+    1. Blocks free-form SQL generation (reuses guarded templates).
+    2. Dynamically routes between Structured Data, Vector Documentation RAG, or Hybrid.
+    3. Maintains multi-turn conversation context (SKU, City, Reorder Qty).
+    4. Returns 6-part standardized executive markdown prose, verified sources, and tabular data.
     """
     user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
-    result = handle_user_natural_language_query(
+    result = decision_rag_synthesizer.synthesize(
         db=db,
-        query_text=payload.query,
+        query=payload.query,
         dataset_id=payload.dataset_id,
         user_id=user_id,
         session_id=payload.session_id,
@@ -96,21 +98,32 @@ def get_chat_history(
     user_id = current_user.id if current_user and getattr(current_user, "id", None) else None
     if session_id:
         messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at.asc()).all()
+        formatted_messages = []
+        for m in messages:
+            msg_data = {
+                "id": m.id,
+                "sender_role": m.sender_role,
+                "message": m.message,
+                "query_template": m.query_template,
+                "template_params": m.template_params,
+                "execution_ms": m.execution_ms,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            if m.retrieved_context:
+                try:
+                    ctx = json.loads(m.retrieved_context)
+                    msg_data["sources"] = ctx.get("sources", [])
+                    msg_data["data_sources"] = ctx.get("data_sources", [])
+                    msg_data["document_sources"] = ctx.get("doc_sources", [])
+                    msg_data["intent"] = ctx.get("query_type")
+                except Exception:
+                    pass
+            formatted_messages.append(msg_data)
+
         return {
             "status": "success",
             "session_id": session_id,
-            "messages": [
-                {
-                    "id": m.id,
-                    "sender_role": m.sender_role,
-                    "message": m.message,
-                    "query_template": m.query_template,
-                    "template_params": m.template_params,
-                    "execution_ms": m.execution_ms,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
-                for m in messages
-            ],
+            "messages": formatted_messages,
         }
 
     # Otherwise list user's sessions
@@ -130,6 +143,18 @@ def get_chat_history(
             for s in sessions
         ],
     }
+
+
+@router.get("/session/{session_id}")
+def get_session_by_id(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_or_guest),
+):
+    """
+    Returns messages for a specific session ID.
+    """
+    return get_chat_history(session_id=session_id, db=db, current_user=current_user)
 
 
 @router.delete("/session/{session_id}")

@@ -72,3 +72,12 @@ backend/.env
 *~
 .DS_Store
 Thumbs.db
+
+# ===========================
+# Vector Database & Embeddings
+# ===========================
+data/
+data/vector_store/
+*.chroma/
+rag-chatbot/vector_store/*
+!rag-chatbot/vector_store/.gitkeep
